@@ -1,0 +1,15 @@
+# Python caching
+__pycache__/
+*.pyc
+
+# Local data files created during tests
+*.npy
+
+# Environment files
+.env
+venv/
+.venv/
+
+# Operating system files
+.DS_Store
+Thumbs.db
