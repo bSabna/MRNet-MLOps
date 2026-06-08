@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.1+cpu
+numpy==1.26.4
+fastapi
+uvicorn
+prometheus_client
+python-multipart
