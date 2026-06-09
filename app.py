@@ -28,7 +28,7 @@ WEIGHTS_PATH = os.path.join(BASE_DIR, "gatekeeper_weights.pth")
 
 gatekeeper = PlaneGatekeeperCNN()
 gatekeeper.load_state_dict(torch.load(WEIGHTS_PATH, map_location="cpu"))
-gatekeeper.eval(
+gatekeeper.eval()
 
 # ID mapping matching how the toy data script distributed the labels
 PLANE_MAP = {0: "axial", 1: "coronal", 2: "sagittal"}
