@@ -1,1 +1,2 @@
+mrnet_3dcnn_artifacts.pth filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
