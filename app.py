@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import io
+import os
 
 app = FastAPI(title="MRNet Knee Pathology Diagnosis API")
 
@@ -21,9 +22,13 @@ class PlaneGatekeeperCNN(nn.Module):
         return self.classifier(self.features(x).view(x.size(0), -1))
 
 # 2. Instatitate and load our lightweight quality check weights
+# Automatically resolve the exact folder where app.py lives
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WEIGHTS_PATH = os.path.join(BASE_DIR, "gatekeeper_weights.pth")
+
 gatekeeper = PlaneGatekeeperCNN()
-gatekeeper.load_state_dict(torch.load("gatekeeper_weights.pth", map_location="cpu"))
-gatekeeper.eval()
+gatekeeper.load_state_dict(torch.load(WEIGHTS_PATH, map_location="cpu"))
+gatekeeper.eval(
 
 # ID mapping matching how the toy data script distributed the labels
 PLANE_MAP = {0: "axial", 1: "coronal", 2: "sagittal"}
