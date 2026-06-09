@@ -69,7 +69,42 @@ except Exception as e:
 def home():
     return {"status": "healthy", "message": "MRNet API is operational."}
 
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    # Your tensor processing logic goes here
-    return {"prediction": "placeholder"}
+@app.post("/predict", summary="Diagnose Knee Pathology from MRI Views")
+async def predict(
+    axial_file: UploadFile = File(..., description="The Axial view MRI tensor data (.npy file)"),
+    sagittal_file: UploadFile = File(..., description="The Sagittal view MRI tensor data (.npy file)"),
+    coronal_file: UploadFile = File(..., description="The Coronal view MRI tensor data (.npy file)")
+):
+    """
+    Submit the 3 key MRI sequences (Axial, Sagittal, Coronal) 
+    to get the multi-class pathology predictions.
+    """
+    try:
+        # 1. Read the raw bytes from the uploaded files
+        axial_bytes = await axial_file.read()
+        sagittal_bytes = await sagittal_file.read()
+        coronal_bytes = await coronal_file.read()
+        
+        # TODO: Implement your preprocessing pipeline here 
+        # e.g., np.load(io.BytesIO(axial_bytes)), tracking tensors, etc.
+        
+        # Placeholder dictionary representing your 3 target classes
+        return {
+            "status": "success",
+            "filename_received": {
+                "axial": axial_file.filename,
+                "sagittal": sagittal_file.filename,
+                "coronal": coronal_file.filename
+            },
+            "predictions": {
+                "Abnormal": 0.85,
+                "ACL Tear": 0.12,
+                "Meniscus Tear": 0.03
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing files: {str(e)}"
+        )
