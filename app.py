@@ -21,27 +21,23 @@ class GatekeeperModel(nn.Module):
     def __init__(self):
         super(GatekeeperModel, self).__init__()
         self.features = nn.Sequential(
-            # features.0: Expects 1 input channel (MRI slice), outputs 8 channels
             nn.Conv2d(1, 8, kernel_size=3, padding=1), 
             nn.ReLU(),
             nn.MaxPool2d(2),
             
-            # features.3: Next convolutional layer block
             nn.Conv2d(8, 16, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
             
-            # features.6: Final convolutional layer block
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)) # Forces spatial dimensions to align perfectly to 512
+            nn.AdaptiveAvgPool2d((4, 4)) 
         )
         self.classifier = nn.Sequential(
-            # classifier.0: Maps 512 flattened features (32 channels * 4 * 4) to 32
             nn.Linear(32 * 4 * 4, 32), 
             nn.ReLU(),
-            # classifier.2: Final prediction layer outputting diagnosis mapping
-            nn.Linear(32, 2) 
+            # CHANGED: Changed 2 to 3 to match your trained checkpoint matrix
+            nn.Linear(32, 3) 
         )
 
     def forward(self, x):
