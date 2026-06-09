@@ -1,8 +1,8 @@
+import io
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 import numpy as np
 import torch
 import torch.nn as nn
-import io
 import os
 
 app = FastAPI(title="MRNet Knee Pathology Diagnosis API")
