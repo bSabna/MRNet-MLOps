@@ -15,6 +15,7 @@ COPY --from=builder /root/.local /root/.local
 COPY app.py .
 COPY mrnet_architecture.py .
 COPY mrnet_3dcnn_artifacts.pth .
+COPY gatekeeper_weights.pth .
 
 ENV PATH=/root/.local/bin:$PATH
 EXPOSE 8000
