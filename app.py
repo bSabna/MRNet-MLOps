@@ -1,160 +1,243 @@
 import io
-import torch
-import torch.nn as nn
+import time
 import numpy as np
-import base64
-import os
-import scipy.stats  # Used to compute entropy for the uncertainty summary
+import torch
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from prometheus_client import Counter, Histogram, make_asgi_app
+ 
+from mrnet_architecture import load_production_model, preprocess_volume
+ 
 
-app = FastAPI(title="MRNet Knee Pathology Diagnosis API")
+# APP INIT
 
-# 1. Fetch the giant string securely from Hugging Face Secrets
-WEIGHTS_BASE64 = os.environ.get("GATEKEEPER_WEIGHTS")
+ 
+app = FastAPI(
+    title="MRNet Knee Pathology Diagnosis API",
+    description="End-to-end MLOps pipeline for knee MRI classification with plane validation.",
+    version="2.0.0"
+)
+ 
+# Prometheus metrics
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+ 
+PREDICTION_COUNTER = Counter(
+    "model_predictions_total",
+    "Total number of positive predictions",
+    ["pathology"]
+)
+LATENCY_HISTOGRAM = Histogram(
+    "model_inference_latency_seconds",
+    "Inference latency in seconds"
+)
+GATEKEEPER_REJECTION_COUNTER = Counter(
+    "gatekeeper_rejections_total",
+    "Number of uploads rejected by gatekeeper",
+    ["expected_plane"]
+)
+ 
+ 
 
-if not WEIGHTS_BASE64:
-    raise RuntimeError(
-        "CRITICAL ERROR: 'GATEKEEPER_WEIGHTS' secret not found in Hugging Face Space Settings!"
-    )
+# 1. GATEKEEPER MODEL
 
-# 2. Reconstructed Model Class matching your exact state_dict shapes
-class GatekeeperModel(nn.Module):
+ 
+class PlaneGatekeeperCNN(torch.nn.Module):
+    """Lightweight 2D CNN to verify MRI anatomical plane orientation."""
     def __init__(self):
-        super(GatekeeperModel, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1), 
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)) 
+        super(PlaneGatekeeperCNN, self).__init__()
+        self.features = torch.nn.Sequential(
+            torch.nn.Conv2d(1, 8, kernel_size=3, padding=1),
+            torch.nn.BatchNorm2d(8),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2, 2),
+ 
+            torch.nn.Conv2d(8, 16, kernel_size=3, padding=1),
+            torch.nn.BatchNorm2d(16),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2, 2),
+ 
+            torch.nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            torch.nn.BatchNorm2d(32),
+            torch.nn.ReLU(),
+            torch.nn.AdaptiveAvgPool2d((4, 4))
         )
-        self.classifier = nn.Sequential(
-            nn.Linear(32 * 4 * 4, 32), 
-            nn.ReLU(),
-            nn.Linear(32, 3) 
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(32 * 4 * 4, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 3)
         )
-
+ 
     def forward(self, x):
         x = self.features(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-        return x
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+ 
+ 
+# Label mapping: matches train_gatekeeper.py
+PLANE_LABELS = {0: "axial", 1: "coronal", 2: "sagittal"}
+ 
+print("Loading gatekeeper model...")
+gatekeeper = PlaneGatekeeperCNN()
+gatekeeper.load_state_dict(
+    torch.load("gatekeeper_weights.pth", map_location=torch.device("cpu"))
+)
+gatekeeper.eval()
+print(" Gatekeeper model loaded.")
+ 
+ 
 
-# 3. Decode and reconstruct the weights in-memory during container startup
-try:
-    print("Decoding model weights from Hugging Face Secrets...")
-    weights_binary = base64.b64decode(WEIGHTS_BASE64)
-    buffer = io.BytesIO(weights_binary)
-    
-    model = GatekeeperModel() 
-    state_dict = torch.load(buffer, map_location=torch.device('cpu'))
-    model.load_state_dict(state_dict)
-    model.eval()
-    print("Model weights initialized successfully out of secure memory!")
-except Exception as e:
-    print(f"Failed to load model: {str(e)}")
-    raise e
+# 2. MAIN DIAGNOSIS MODEL
 
+print("Loading main 3D CNN diagnosis model...")
+MODEL_PATH = "mrnet_3dcnn_artifacts.pth"
+diagnosis_model = load_production_model(MODEL_PATH)
+print(" Diagnosis model loaded.")
+ 
+# Optimal thresholds from Youden's J statistic
+THRESHOLDS = {"ACL": 0.356, "Meniscus": 0.400, "Abnormal": 0.497}
+ 
+ 
 
-def preprocess_tensor(file_bytes: bytes) -> torch.Tensor:
+# 3. HELPER FUNCTIONS
+
+ 
+def bytes_to_middle_slice_tensor(file_bytes: bytes) -> torch.Tensor:
     """
-    Parses raw bytes into a NumPy array, extracts a representative slice, 
-    and handles single-channel matching for the model.
+    Load .npy volume from bytes, extract middle slice,
+    normalize, resize to 256x256, return (1, 1, 256, 256) tensor.
     """
-    # Load numpy array directly out of the binary byte memory stream
     arr = np.load(io.BytesIO(file_bytes))
-    
-    # If the array is a 3D volume (Slices, Height, Width), let's extract the middle slice
+ 
+    # Extract middle slice from 3D volume
     if len(arr.shape) == 3:
-        middle_idx = arr.shape[0] // 2
-        tensor_2d = arr[middle_idx]
+        mid = arr.shape[0] // 2
+        slice_2d = arr[mid].astype(np.float32)
     elif len(arr.shape) == 2:
-        tensor_2d = arr
+        slice_2d = arr.astype(np.float32)
     else:
-        # Fallback/reshape if shape is unconventional
-        tensor_2d = arr.reshape(arr.shape[-2], arr.shape[-1])
-        
-    # Convert to float PyTorch tensor, add Batch and Channel dimensions: (1, 1, H, W)
-    tensor = torch.tensor(tensor_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    return tensor
+        raise ValueError(f"Unexpected array shape: {arr.shape}")
+ 
+    # Normalize to [0, 1]
+    vmin, vmax = slice_2d.min(), slice_2d.max()
+    if vmax > vmin:
+        slice_2d = (slice_2d - vmin) / (vmax - vmin)
+ 
+    # Resize to 256x256
+    from PIL import Image
+    img = Image.fromarray(slice_2d).resize((256, 256), Image.BILINEAR)
+    slice_2d = np.array(img)
+ 
+    return torch.tensor(slice_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,256,256)
+ 
+ 
+def validate_plane(file_bytes: bytes, expected_plane: str) -> tuple[bool, str, float]:
+    """
+    Run gatekeeper on a single file.
+    Returns (is_valid, predicted_plane, confidence)
+    """
+    tensor = bytes_to_middle_slice_tensor(file_bytes)
+    with torch.no_grad():
+        logits = gatekeeper(tensor)
+        probs = torch.softmax(logits, dim=1).squeeze()
+        predicted_idx = probs.argmax().item()
+        predicted_plane = PLANE_LABELS[predicted_idx]
+        confidence = float(probs[predicted_idx])
+ 
+    is_valid = (predicted_plane == expected_plane)
+    return is_valid, predicted_plane, confidence
+ 
+ 
 
+# 4. ENDPOINTS
 
-@app.get("/")
-def home():
-    return {"status": "healthy", "message": "MRNet API is operational."}
-
-
+ 
+@app.get("/", summary="Root")
+def root():
+    return {"status": "healthy", "message": "MRNet Knee Pathology API is operational."}
+ 
+ 
+@app.get("/health", summary="Health Check")
+def health():
+    return {"status": "healthy"}
+ 
+ 
 @app.post("/predict", summary="Diagnose Knee Pathology from MRI Views")
 async def predict(
-    axial_file: UploadFile = File(..., description="The Axial view MRI tensor data (.npy file)"),
-    sagittal_file: UploadFile = File(..., description="The Sagittal view MRI tensor data (.npy file)"),
-    coronal_file: UploadFile = File(..., description="The Coronal view MRI tensor data (.npy file)")
+    sagittal: UploadFile = File(..., description="Sagittal plane MRI (.npy)"),
+    coronal:  UploadFile = File(..., description="Coronal plane MRI (.npy)"),
+    axial:    UploadFile = File(..., description="Axial plane MRI (.npy)")
 ):
     """
-    Processes Axial, Sagittal, and Coronal views dynamically, evaluates them 
-    using the model, and builds a comprehensive pathology and uncertainty summary.
+    Step 1 — Gatekeeper validates each upload is the correct anatomical plane.
+    Step 2 — Main 3D CNN runs multi-label diagnosis.
+    Returns predictions for ACL tear, Meniscus tear, and Abnormality.
     """
+    start_time = time.time()
+ 
+    # Read file bytes
+    sag_bytes = await sagittal.read()
+    cor_bytes = await coronal.read()
+    axi_bytes = await axial.read()
+ 
+    # ── GATEKEEPER VALIDATION ──
+    validations = [
+        (sag_bytes, "sagittal", sagittal.filename),
+        (cor_bytes, "coronal",  coronal.filename),
+        (axi_bytes, "axial",    axial.filename),
+    ]
+ 
+    for file_bytes, expected_plane, filename in validations:
+        is_valid, predicted_plane, confidence = validate_plane(file_bytes, expected_plane)
+        if not is_valid:
+            GATEKEEPER_REJECTION_COUNTER.labels(expected_plane=expected_plane).inc()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Plane mismatch detected in '{filename}': "
+                    f"Expected '{expected_plane}' scan but received '{predicted_plane}' "
+                    f"(confidence: {confidence:.1%}). "
+                    f"Please upload the correct MRI plane into the correct field."
+                )
+            )
+ 
+    # ── MAIN DIAGNOSIS ──
     try:
-        # Read uploaded file streams
-        axial_bytes = await axial_file.read()
-        sagittal_bytes = await sagittal_file.read()
-        coronal_bytes = await coronal_file.read()
-        
-        # Preprocess each view to structural (1, 1, H, W) tensors
-        t_axial = preprocess_tensor(axial_bytes)
-        t_sagittal = preprocess_tensor(sagittal_bytes)
-        t_coronal = preprocess_tensor(coronal_bytes)
-        
-        # Combine view representations via mean aggregation for the prediction profile
+        sag_tensor = preprocess_volume(np.load(io.BytesIO(sag_bytes)))
+        cor_tensor = preprocess_volume(np.load(io.BytesIO(cor_bytes)))
+        axi_tensor = preprocess_volume(np.load(io.BytesIO(axi_bytes)))
+ 
         with torch.no_grad():
-            out_axial = model(t_axial)
-            out_sagittal = model(t_sagittal)
-            out_coronal = model(t_coronal)
-            
-            # Combine raw logits across all three perspectives
-            combined_logits = (out_axial + out_sagittal + out_coronal) / 3.0
-            probabilities = torch.softmax(combined_logits, dim=1).squeeze().tolist()
-            
-        # Map probabilities out to the 3 distinct classes
-        class_mappings = ["Abnormal", "ACL Tear", "Meniscus Tear"]
-        predictions_dict = {class_mappings[i]: round(probabilities[i], 4) for i in range(3)}
-        
-        # Compute Shannon Entropy to determine diagnostic uncertainty
-        # A uniform distribution across 3 classes yields maximum entropy (~1.098)
-        entropy_val = scipy.stats.entropy(probabilities)
-        max_entropy = np.log(3)
-        uncertainty_score = float(entropy_val / max_entropy)
-        
-        # Determine human-readable uncertainty description strings
-        if uncertainty_score > 0.65:
-            uncertainty_summary = "Highly Uncertain. Model predictions are split closely across multiple conditions. Clinical verification strongly recommended."
-        elif uncertainty_score > 0.35:
-            uncertainty_summary = "Moderately Uncertain. Clear lean toward primary diagnosis, but secondary indicators are active."
-        else:
-            uncertainty_summary = "Highly Confident. Strong mathematical convergence toward the leading diagnosis profile."
-
+            logits = diagnosis_model(sag_tensor, cor_tensor, axi_tensor)
+            probs = torch.sigmoid(logits).squeeze(0).numpy()
+ 
+        results = {
+            "ACL":      {"probability": round(float(probs[0]), 4), "positive": bool(probs[0] > THRESHOLDS["ACL"])},
+            "Meniscus": {"probability": round(float(probs[1]), 4), "positive": bool(probs[1] > THRESHOLDS["Meniscus"])},
+            "Abnormal": {"probability": round(float(probs[2]), 4), "positive": bool(probs[2] > THRESHOLDS["Abnormal"])},
+        }
+ 
+        # Prometheus counters
+        for pathology, data in results.items():
+            if data["positive"]:
+                PREDICTION_COUNTER.labels(pathology=pathology).inc()
+ 
+        LATENCY_HISTOGRAM.observe(time.time() - start_time)
+ 
         return {
             "status": "success",
+            "gatekeeper": "All planes validated ",
             "files_processed": {
-                "axial": axial_file.filename,
-                "sagittal": sagittal_file.filename,
-                "coronal": coronal_file.filename
+                "sagittal": sagittal.filename,
+                "coronal":  coronal.filename,
+                "axial":    axial.filename,
             },
-            "predictions": predictions_dict,
-            "uncertainty_assessment": {
-                "normalized_uncertainty_score": round(uncertainty_score, 4),
-                "summary": uncertainty_summary
-            }
+            "predictions": results,
+            "inference_time_seconds": round(time.time() - start_time, 3)
         }
-        
+ 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error evaluating patient scans: {str(e)}"
+            detail=f"Inference failed: {str(e)}"
         )
