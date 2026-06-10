@@ -5,3 +5,4 @@ fastapi
 uvicorn
 prometheus_client
 python-multipart
+scipy
