@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 import base64
 import os
+import scipy.stats  # Used to compute entropy for the uncertainty summary
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 
 app = FastAPI(title="MRNet Knee Pathology Diagnosis API")
@@ -36,7 +37,6 @@ class GatekeeperModel(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(32 * 4 * 4, 32), 
             nn.ReLU(),
-            # CHANGED: Changed 2 to 3 to match your trained checkpoint matrix
             nn.Linear(32, 3) 
         )
 
@@ -52,10 +52,7 @@ try:
     weights_binary = base64.b64decode(WEIGHTS_BASE64)
     buffer = io.BytesIO(weights_binary)
     
-    # Initialize our reconstructed model framework
     model = GatekeeperModel() 
-    
-    # Load the state dictionary directly into CPU memory
     state_dict = torch.load(buffer, map_location=torch.device('cpu'))
     model.load_state_dict(state_dict)
     model.eval()
@@ -65,9 +62,33 @@ except Exception as e:
     raise e
 
 
+def preprocess_tensor(file_bytes: bytes) -> torch.Tensor:
+    """
+    Parses raw bytes into a NumPy array, extracts a representative slice, 
+    and handles single-channel matching for the model.
+    """
+    # Load numpy array directly out of the binary byte memory stream
+    arr = np.load(io.BytesIO(file_bytes))
+    
+    # If the array is a 3D volume (Slices, Height, Width), let's extract the middle slice
+    if len(arr.shape) == 3:
+        middle_idx = arr.shape[0] // 2
+        tensor_2d = arr[middle_idx]
+    elif len(arr.shape) == 2:
+        tensor_2d = arr
+    else:
+        # Fallback/reshape if shape is unconventional
+        tensor_2d = arr.reshape(arr.shape[-2], arr.shape[-1])
+        
+    # Convert to float PyTorch tensor, add Batch and Channel dimensions: (1, 1, H, W)
+    tensor = torch.tensor(tensor_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    return tensor
+
+
 @app.get("/")
 def home():
     return {"status": "healthy", "message": "MRNet API is operational."}
+
 
 @app.post("/predict", summary="Diagnose Knee Pathology from MRI Views")
 async def predict(
@@ -76,35 +97,64 @@ async def predict(
     coronal_file: UploadFile = File(..., description="The Coronal view MRI tensor data (.npy file)")
 ):
     """
-    Submit the 3 key MRI sequences (Axial, Sagittal, Coronal) 
-    to get the multi-class pathology predictions.
+    Processes Axial, Sagittal, and Coronal views dynamically, evaluates them 
+    using the model, and builds a comprehensive pathology and uncertainty summary.
     """
     try:
-        # 1. Read the raw bytes from the uploaded files
+        # Read uploaded file streams
         axial_bytes = await axial_file.read()
         sagittal_bytes = await sagittal_file.read()
         coronal_bytes = await coronal_file.read()
         
-        # TODO: Implement your preprocessing pipeline here 
-        # e.g., np.load(io.BytesIO(axial_bytes)), tracking tensors, etc.
+        # Preprocess each view to structural (1, 1, H, W) tensors
+        t_axial = preprocess_tensor(axial_bytes)
+        t_sagittal = preprocess_tensor(sagittal_bytes)
+        t_coronal = preprocess_tensor(coronal_bytes)
         
-        # Placeholder dictionary representing your 3 target classes
+        # Combine view representations via mean aggregation for the prediction profile
+        with torch.no_grad():
+            out_axial = model(t_axial)
+            out_sagittal = model(t_sagittal)
+            out_coronal = model(t_coronal)
+            
+            # Combine raw logits across all three perspectives
+            combined_logits = (out_axial + out_sagittal + out_coronal) / 3.0
+            probabilities = torch.softmax(combined_logits, dim=1).squeeze().tolist()
+            
+        # Map probabilities out to the 3 distinct classes
+        class_mappings = ["Abnormal", "ACL Tear", "Meniscus Tear"]
+        predictions_dict = {class_mappings[i]: round(probabilities[i], 4) for i in range(3)}
+        
+        # Compute Shannon Entropy to determine diagnostic uncertainty
+        # A uniform distribution across 3 classes yields maximum entropy (~1.098)
+        entropy_val = scipy.stats.entropy(probabilities)
+        max_entropy = np.log(3)
+        uncertainty_score = float(entropy_val / max_entropy)
+        
+        # Determine human-readable uncertainty description strings
+        if uncertainty_score > 0.65:
+            uncertainty_summary = "Highly Uncertain. Model predictions are split closely across multiple conditions. Clinical verification strongly recommended."
+        elif uncertainty_score > 0.35:
+            uncertainty_summary = "Moderately Uncertain. Clear lean toward primary diagnosis, but secondary indicators are active."
+        else:
+            uncertainty_summary = "Highly Confident. Strong mathematical convergence toward the leading diagnosis profile."
+
         return {
             "status": "success",
-            "filename_received": {
+            "files_processed": {
                 "axial": axial_file.filename,
                 "sagittal": sagittal_file.filename,
                 "coronal": coronal_file.filename
             },
-            "predictions": {
-                "Abnormal": 0.85,
-                "ACL Tear": 0.12,
-                "Meniscus Tear": 0.03
+            "predictions": predictions_dict,
+            "uncertainty_assessment": {
+                "normalized_uncertainty_score": round(uncertainty_score, 4),
+                "summary": uncertainty_summary
             }
         }
         
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing files: {str(e)}"
+            detail=f"Error evaluating patient scans: {str(e)}"
         )
