@@ -18,7 +18,5 @@ COPY mrnet_3dcnn_artifacts.pth .
 COPY gatekeeper_weights.pth .
 
 ENV PATH=/root/.local/bin:$PATH
-EXPOSE 8000
-
-# Start Uvicorn pointing directly to app.py (:app refers to the FastAPI variable instance)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 7860
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
