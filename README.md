@@ -1,38 +1,50 @@
----
-title: MRNet Medical Inference API
-emoji: 🧠
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # MRNet Volumetric MRI Classification API
 MRNet-MLOps — Knee MRI Pathology Detection API An end-to-end MLOps pipeline that serves a multi-stream 3D CNN for knee MRI classification via a production-ready FastAPI service, containerized with Docker, monitored with Prometheus, and deployed on Hugging Face Spaces.
 
-Project Overview
+## Project Overview
 This project takes a trained 3D CNN model (from the MRNet capstone project) and wraps it in a full MLOps pipeline:
 
-Gatekeeper CNN validates that each uploaded MRI file is the correct anatomical plane (axial/coronal/sagittal) before inference
-Accepts three MRI planes as .npy file uploads and runs multi-label diagnosis
-Returns predictions for ACL tear, Meniscus tear, and Abnormality with a clinical summary
-Uses Youden's J statistic for optimal classification thresholds
-Tracks inference metrics with Prometheus
-Fully containerized with Docker and deployed to the cloud
-Model Details
+- Gatekeeper CNN validates that each uploaded MRI file is the correct anatomical plane (axial/coronal/sagittal) before inference
+- Accepts three MRI planes as .npy file uploads and runs multi-label diagnosis
+- Returns predictions for ACL tear, Meniscus tear, and Abnormality with a clinical summary
+- Uses Youden's J statistic for optimal classification thresholds
+- Tracks inference metrics with Prometheus
+- Fully containerized with Docker and deployed to the cloud
+
+## Model Details
+---
 Pathology	AUC	Threshold (Youden's J)
 ACL Tear	0.827	0.356
 Meniscus	0.746	0.400
 Abnormal	0.833	0.497
-Gatekeeper Model (Plane Classifier)
+---
+
+## Gatekeeper Model (Plane Classifier)
+---
 Plane	Precision	Recall	F1
 Axial	1.00	0.95	0.98
 Coronal	1.00	1.00	1.00
 Sagittal	0.98	1.00	0.99
 Overall Accuracy			99.1%
-Repository Structure
-MRNet-MLOps/ │ ├── .github/ │ └── workflows/ │ └── ci-cd.yml # CI/CD pipeline (GitHub Actions) │ ├── training/ │ └── train_gatekeeper.py # Gatekeeper training script (real MRNet data) │ ├── app.py # FastAPI app with Gatekeeper + Prometheus metrics ├── mrnet_architecture.py # Main 3D CNN model architecture & preprocessing ├── mrnet_3dcnn_artifacts.pth # Trained diagnosis model weights (Git LFS) ├── gatekeeper_weights.pth # Trained gatekeeper model weights (Git LFS) ├── Dockerfile # Container definition ├── requirements.txt # Python dependencies ├── test_api.py # API endpoint tests ├── .gitattributes # Git LFS tracking config ├── .gitignore # Ignored files └── README.md # Project documentation
+---
+
+## Repository Structure
+MRNet-MLOps/ 
+│ ├── .github/
+│ └── workflows/ 
+│ └── ci-cd.yml # CI/CD pipeline (GitHub Actions) 
+│ ├── training/ 
+│ └── train_gatekeeper.py # Gatekeeper training script (real MRNet data) 
+│ ├── app.py # FastAPI app with Gatekeeper + Prometheus metrics 
+├── mrnet_architecture.py # Main 3D CNN model architecture & preprocessing 
+├── mrnet_3dcnn_artifacts.pth # Trained diagnosis model weights (Git LFS) 
+├── gatekeeper_weights.pth # Trained gatekeeper model weights (Git LFS)
+├── Dockerfile # Container definition 
+├── requirements.txt # Python dependencies 
+├── test_api.py # API endpoint tests 
+├── .gitattributes # Git LFS tracking config 
+├── .gitignore # Ignored files 
+└── README.md # Project documentation
 
 Getting Started
 Option 1 — Use the Live API
@@ -54,13 +66,17 @@ docker run -p 7860:7860 mrnet-api
 Option 3 — Run Locally without Docker
 pip install -r requirements.txt
 uvicorn app:app --reload --port 7860
-API Endpoints
+
+## API Endpoints
+---
 Method	Endpoint	Description
 GET	/	Root — health check
 GET	/health	Returns {"status": "healthy"}
 POST	/predict	Run gatekeeper validation + full diagnosis
 GET	/metrics	Prometheus metrics endpoint
 GET	/docs	Interactive Swagger UI
+---
+
 Example /predict Request
 import requests
 
@@ -100,14 +116,16 @@ If the wrong plane is uploaded to the wrong field:
 {
   "detail": "Plane mismatch in '0014.npy': Expected 'sagittal' but received 'axial' (confidence: 94.2%). Please upload the correct MRI plane into the correct field."
 }
-Monitoring with Prometheus
+## Monitoring with Prometheus
 The /metrics endpoint exposes real-time model telemetry:
 
-Metric	Description
+## Metric	Description
 model_predictions_total	Total positive predictions per pathology
 model_inference_latency_seconds	Inference time histogram
 gatekeeper_rejections_total	Uploads rejected per expected plane
-Tech Stack
+
+## Tech Stack
+---
 Layer	Technology
 Model	PyTorch · 3D CNN · 2D CNN (Gatekeeper)
 API	FastAPI · Uvicorn
@@ -117,8 +135,8 @@ Deployment	Hugging Face Spaces
 CI/CD	GitHub Actions
 Large File Storage	Git LFS / Hugging Face Xet
 Language	Python 3.10
-Author
+---
 Author
 
-Sabna Balasubramoniapillai M.S. Data Science, University of West Florida (GPA: 3.97) sabna.pillai@gmail.com GitHub Profile
+Sabna Balasubramoniapillai M.S. Data Science, University of West Florida (GPA: 3.97) sabna.pillai@gmail.com GitHub Profile: ](https://github.com/bSabna)
 
